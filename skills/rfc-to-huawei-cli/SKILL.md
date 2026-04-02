@@ -1,6 +1,6 @@
 ---
 name: rfc-to-huawei-cli
-description: Use when mapping RFC fields, packet structures, state-machine objects, path attributes, TLVs, counters, or protocol databases to Huawei display/debugging commands across routing, MPLS, multicast, security, and neighbor protocols.
+description: Use when mapping RFC fields, packet structures, state-machine objects, path attributes, TLVs, counters, or protocol databases to Huawei display commands across routing, MPLS, multicast, security, and neighbor protocols.
 ---
 
 # 通过 RFC 字段定位华为设备 CLI
@@ -9,7 +9,7 @@ description: Use when mapping RFC fields, packet structures, state-machine objec
 
 这个 skill 用来回答一类问题：
 
-> **RFC 里的字段 / 对象 / TLV / 报文 / 状态，在华为设备上应该看什么命令？**
+> **RFC 里的字段 / 对象 / TLV / 报文 / 状态，在华为设备上应该看什么 `display` 命令？**
 
 它不是“背命令表”，而是一个**通用推导流程**。
 
@@ -44,7 +44,7 @@ description: Use when mapping RFC fields, packet structures, state-machine objec
 
 不要用于：
 - 非华为设备
-- 用户明确要的是配置命令，而不是查询 / 调试命令
+- 用户明确要的是配置命令，而不是查询命令
 - 只需要二进制报文字节偏移解析，不关心设备 CLI
 
 ## 本地手册配置
@@ -146,7 +146,7 @@ description: Use when mapping RFC fields, packet structures, state-machine objec
 
 | 对象层级 | 常见华为命令族 |
 | --- | --- |
-| 报文 / message / packet | `debugging <proto> packet ...` |
+| 报文 / message / packet | `display <proto> peer/interface/statistics/error ...` |
 | 数据库 / LSA / LSP / FEC / tunnel object | `display <proto> lsdb/database/...` |
 | 路由 / path attribute / best path / next hop | `display <proto> routing-table ...` |
 | 邻居 / peer / adjacency / session | `display <proto> peer/neighbor/session ...` |
@@ -205,7 +205,7 @@ description: Use when mapping RFC fields, packet structures, state-machine objec
 ```text
 <协议名> + <标准对象名>
 <协议名> + <候选关键词>
-display/debugging + <候选关键词>
+display + <候选关键词>
 ```
 
 优先在本地手册里找：
@@ -219,7 +219,7 @@ display/debugging + <候选关键词>
 
 ```text
 <协议名> + <标准对象名> + Huawei
-<协议名> + display/debugging + <标准对象名>
+<协议名> + display + <标准对象名>
 <协议名> + <候选关键词> + Huawei
 ```
 
@@ -370,6 +370,13 @@ display/debugging + <候选关键词>
 - <前置条件>
 ```
 
+## display-only 约束
+
+- 最终答案只允许输出 `display` 开头的命令。
+- 即使本地手册中存在 `debugging` 类命令，也只能把它当作背景证据，不作为最终答案输出。
+- 报文层对象优先映射到 `display <proto> peer/interface/statistics/error ...` 这类可观察结果面。
+- 如果字段本质上来自某个报文，但设备上没有直接的 `display packet ...` 视图，就回答最接近该字段语义的 `display` 观察面。
+
 ## 协议无关的主规则
 
 ### 规则 1：先分类对象层级
@@ -388,7 +395,7 @@ display/debugging + <候选关键词>
 
 ### 规则 3：CLI 优先走统一命令族
 
-- 报文 -> `debugging <proto> packet`
+- 报文 -> `display <proto> peer/interface/statistics/error ...`
 - 数据库对象 -> `display <proto> lsdb/database/...`
 - 属性/结果 -> `display <proto> routing-table/...`
 - 邻居/状态 -> `display <proto> peer/neighbor/...`
@@ -412,7 +419,7 @@ display/debugging + <候选关键词>
 - 搜不到，只能标 `高置信推断` 或 `低置信推断`
 - 不能把推断写成已确认事实
 
-## Worked Example 1：OSPF Ack 报文头
+## Worked Example 1：OSPF Ack 报文头（display-only 约束）
 
 **输入**
 `OSPFv2.body@LSAcknowledge.lsa_headers`
@@ -425,20 +432,21 @@ display/debugging + <候选关键词>
 
 **推荐命令**
 ```text
-debugging ospf [process-id] packet ack [interface ...] [brief] [filter ...]
+display ospf statistics packet
 ```
 
 **补充命令**
 ```text
-display ospf statistics packet
 display ospf cumulative
+display ospf peer
 ```
 
 **输出回验**
-- Ack / LSAck 相关报文统计
-- LSA Header 相关输出字段
+- Ack / LSAck 相关统计项
+- 邻居或状态面里的相关结果字段
 
 **注意事项**
+- 在本 skill 的约束下，所有回答只允许输出 `display` 命令，不输出 `debugging`
 - 这是报文头对象，不是 LSA body 本体
 - 如果用户想看被确认的那条 LSA 本体，要继续映射到 `display ospf lsdb <type>`
 
@@ -559,7 +567,7 @@ display bgp routing-table peer <peer-ip> received-routes <prefix> original-attri
 ## 常见错误
 
 1. **字段路径直接找命令**
-   - 正确做法是：先转标准对象，再找 CLI
+   - 正确做法是：先转标准对象，再找 `display` CLI
 
 2. **只看命令名字，不看输出回验**
    - 名字像不算命中，输出对上才算命中
@@ -575,6 +583,9 @@ display bgp routing-table peer <peer-ip> received-routes <prefix> original-attri
 
 6. **搜不到官方页还给唯一答案**
    - 必须显式降级为推断，不能伪装成官方确认
+
+7. **输出了非 `display` 命令**
+   - 本 skill 当前约束是：最终答案只允许给 `display` 命令
 
 ## References
 
