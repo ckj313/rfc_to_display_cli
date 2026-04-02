@@ -47,6 +47,27 @@ description: Use when mapping RFC fields, packet structures, state-machine objec
 - 用户明确要的是配置命令，而不是查询 / 调试命令
 - 只需要二进制报文字节偏移解析，不关心设备 CLI
 
+## 本地手册配置
+
+本 skill 目录下固定放一个配置文件：`manuals-config.json`。
+
+当前约定格式：
+
+```json
+{
+  "local_chm_paths": [
+    "/Users/ccc/Downloads/HUAWEI_usg.chm"
+  ],
+  "local_html_manual_dirs": []
+}
+```
+
+使用规则：
+- `local_chm_paths`：本地华为 CHM 手册绝对路径列表
+- `local_html_manual_dirs`：CHM 解包后的 HTML 手册目录列表
+- 查询时先读取这个配置，再决定去哪些本地资料源里搜索
+- 如果配置文件存在且路径有效，本地资料源优先级高于线上 `support/hedex`
+
 ## 总流程
 
 ### 第 1 步：先判断这是“哪一层对象”
