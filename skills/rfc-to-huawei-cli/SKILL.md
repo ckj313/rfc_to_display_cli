@@ -1,213 +1,406 @@
 ---
 name: rfc-to-huawei-cli
-description: Use when mapping RFC fields, packet formats, protocol states, LSA/path attributes, timers, or counters to Huawei display/debugging commands across routing, MPLS, multicast, and neighbor protocols.
+description: Use when mapping RFC fields, packet structures, state-machine objects, path attributes, TLVs, counters, or protocol databases to Huawei display/debugging commands across routing, MPLS, multicast, security, and neighbor protocols.
 ---
 
 # 通过 RFC 字段定位华为设备 CLI
 
 ## Overview
 
-这个 skill 不是只回答 OSPF。它的目标是：**把 RFC 里的对象、字段、状态机、报文、属性、计数器，映射成华为设备上的查询命令。**
+这个 skill 用来回答一类问题：
 
-适用面向：
-- 所有协议族：OSPF、BGP、IS-IS、RIP、LDP、RSVP-TE、BFD、PIM、IGMP、MLD、ARP、ND、IPv6 邻居发现等
-- 所有 RFC 问法：
-  - 直接给字段路径
-  - 直接给 RFC URL / 章节名
-  - 直接给协议对象名
-  - 直接问“这个字段在设备上看什么命令”
+> **RFC 里的字段 / 对象 / TLV / 报文 / 状态，在华为设备上应该看什么命令？**
 
-**核心原则：先识别“观察对象”，再选命令族，不要一上来猜某条具体命令。**
+它不是“背命令表”，而是一个**通用推导流程**。
+
+**核心链条固定为：**
+
+```text
+字段路径 / RFC章节
+-> 标准协议对象
+-> 厂商命名模式
+-> 华为官方文档命令
+-> 输出字段回验
+```
+
+只要按这条链走，就不只适用于 OSPF，还能扩展到：
+- BGP path attributes
+- IS-IS LSP / TLV
+- MPLS / LDP / RSVP-TE
+- PIM / IGMP / MLD
+- BFD
+- ARP / ND
+- IPsec / IKE payload
+- VRRP / LLDP / STP 等协议报文或状态对象
 
 ## When to Use
 
 在下面这类问题里使用：
-- “RFC 2328 的 Router LSA 在华为设备上看哪个命令？”
-- “RFC 4271 的 `NEXT_HOP` / `AS_PATH` / `LOCAL_PREF` 怎么在华为上查？”
-- “`OSPFv2.body@LSAcknowledge.lsa_headers` / `BGP-4.path_attributes.NEXT_HOP` 这种字段路径，对应哪个 CLI？”
-- “给你一个 RFC URL，你能推导华为设备上的 show / display / debugging 命令吗？”
+- “RFC 2328 的 Router LSA 对应华为哪个命令？”
+- “`BGP-4.path_attributes.NEXT_HOP` 在华为设备上看哪里？”
+- “`OSPFv2.body@LSUpdate.lsas[*]@OpaqueAreaLocalLSA.tlvs` 应该看什么？”
+- “给你一个 RFC URL / 章节名，你能推导对应的华为查询命令吗？”
 - “想把 RFC 字段名和设备输出字段名建立对应关系”
 
 不要用于：
 - 非华为设备
-- 需要精确原始报文字节偏移/二进制解码而不是 CLI 排障
-- 用户明确要求的是配置命令而不是查询命令，但没有说明是否要查“运行态 / 收到值 / 宣告值 / 配置值”
+- 用户明确要的是配置命令，而不是查询 / 调试命令
+- 只需要二进制报文字节偏移解析，不关心设备 CLI
 
-## 核心方法
+## 总流程
 
-### 第一步：先识别“用户到底想看什么”
+### 第 1 步：先判断这是“哪一层对象”
 
-先把 RFC 问题归到下面一种观察对象：
+先看字段路径，不先看厂商命令。
 
-| 观察对象 | 典型关键词 | 常见华为命令族 |
+例如：
+- `OSPFv2.body@LSAcknowledge.lsa_headers`
+- `OSPFv2.body@LSUpdate.lsas[*]@SummaryASBRLSA`
+- `OSPFv2.body@LSUpdate.lsas[*]@OpaqueAreaLocalLSA.tlvs`
+- `BGP-4.path_attributes.NEXT_HOP`
+
+先拆成 4 个问题：
+1. **协议**是什么
+2. **报文类型 / 载体**是什么
+3. **对象类型**是什么
+4. **对象粒度**是什么
+
+### 对象层级判断规则
+
+| 路径特征 | 对象层级 | 解释 |
 | --- | --- | --- |
-| 报文/消息本身 | Hello / Update / Ack / PDU / Notification / TLV | `debugging <proto> packet ...` |
-| 协议数据库/广告对象 | LSA / LSP / RIB 条目 / FEC / Label / Join/Prune | `display <proto> lsdb/database/...` |
-| 路由/标签结果 | NEXT_HOP / metric / route / label / preference | `display <proto> routing-table ...` / `display ip routing-table` / `display mpls ...` |
-| 邻居/会话/FSM | adjacency / peer / neighbor / state / capability | `display <proto> peer/neighbor/adjacency/session ...` |
-| 统计/计数器 | cumulative / statistics / counter / packet count | `display <proto> cumulative/statistics ...` |
-| 本地配置值 | configured / enabled / timer / policy | `display current-configuration | include ...` 或协议专用 `display this` |
-| 收到的原始属性 | received-routes / original attribute / received LSA/LSP | 面向“收到值”的专用显示命令 |
-| 发给邻居的值 | advertised-routes / sent / originated | 面向“宣告值”的专用显示命令 |
+| `...Acknowledge...headers` / `...packet.header...` | 报文头对象 | 关注报文本身或报文里携带的头部对象 |
+| `...Update...objects[*]...` / `...lsas[*]@...` | 协议实体对象 | 关注真正的数据库对象/广告对象本体 |
+| `...tlvs` / `...subtlvs` / `...attributes` | TLV / 属性层对象 | 关注对象内部结构，而不是对象名本身 |
+| `...statistics` / `...counter` / `...packets_sent` | 统计层对象 | 关注收发统计，不是对象内容 |
+| `...state` / `...fsm` / `...neighbor` / `...peer` | 邻居/状态层对象 | 关注状态机、能力、邻接或会话 |
 
-### 第二步：区分“当前结果”还是“原始协议值”
+### 重要原则
 
-同一个 RFC 字段，在设备上可能对应多个观察面：
+- `Acknowledge.lsa_headers` 通常意味着：**确认报文里的对象头**，不等于对象 body 本体
+- `Update.objects[*]@Xxx` 通常意味着：**真正的对象内容**
+- `.tlvs` / `.subtlvs` 通常意味着：**需要更细粒度的对象解析与输出回验**
 
-| 用户真实问题 | 应优先回答什么 |
+**不要把“报文层对象”和“数据库/广告对象”混为一谈。**
+
+---
+
+### 第 2 步：先转成标准协议对象名
+
+不要直接用内部字段路径去搜华为命令。
+先把路径翻译成**标准协议术语**。
+
+例如：
+- `RouterLSA` -> `Router-LSA` -> OSPF Type 1
+- `SummaryASBRLSA` -> `ASBR-summary-LSA` -> OSPF Type 4
+- `OpaqueAreaLocalLSA` -> `Area-local Opaque LSA` -> OSPF Opaque Area scope
+- `NEXT_HOP` -> BGP path attribute `NEXT_HOP`
+- `AS_PATH` -> BGP path attribute `AS_PATH`
+- `LSPEntry.TLVs` -> IS-IS LSP TLVs
+
+### 标准化目标
+
+这一阶段要拿到的是：
+- 协议名
+- 标准对象名
+- 作用域 / type / subtype / scope
+- 是否存在标准编号（如 Type 1 / Type 4 / TLV 22）
+
+如果用户给的是 RFC URL / 章节名，先抽：
+1. 协议名
+2. 章节里的标准对象名
+3. 对象类别（报文 / 数据库 / 属性 / TLV / 状态 / 统计）
+
+**重点：先拿标准名字，再找厂商命令。**
+
+---
+
+### 第 3 步：推导华为 CLI 的命名模式
+
+拿到标准对象名后，再推测华为会怎么命名。
+
+华为命令通常不是照抄 RFC 全称，而是会收敛到较稳定的关键词。
+
+### 常见命令族
+
+| 对象层级 | 常见华为命令族 |
 | --- | --- |
-| 这个字段当前生效成什么结果？ | 路由表 / 转发表 / 当前数据库 |
-| 邻居发给我的原始值是什么？ | `received-routes` / `original-attributes` / 报文调试 |
-| 我发给邻居的值是什么？ | `advertised-routes` / 发送侧数据库 / 报文调试 |
-| 我本地怎么配置了它？ | `display current-configuration` |
+| 报文 / message / packet | `debugging <proto> packet ...` |
+| 数据库 / LSA / LSP / FEC / tunnel object | `display <proto> lsdb/database/...` |
+| 路由 / path attribute / best path / next hop | `display <proto> routing-table ...` |
+| 邻居 / peer / adjacency / session | `display <proto> peer/neighbor/session ...` |
+| 统计 / counter / cumulative | `display <proto> statistics` / `display <proto> cumulative` |
+| 配置态 / policy / timer | `display current-configuration` / `display this` |
 
-**不要把“原始协议值”和“设备递归后的最终结果”混成一个答案。**
+### 厂商关键词映射示例
 
-### 第三步：把 RFC 术语翻译成华为术语
-
-华为 CLI 很少原样照抄 RFC 术语。回答时要主动做术语翻译：
-
-| RFC 风格术语 | 华为常见术语 |
+| 标准对象名 | 华为可能关键词 |
 | --- | --- |
-| packet / message | `packet` / `message` / `debugging` 输出 |
-| database | `lsdb` / `database` |
-| advertisement | `route` / `lsa` / `lsp` / `advertised-routes` |
-| neighbor / peer | `peer` / `neighbor` / `adjacency` |
-| path attribute | `attribute` / `routing-table` 明细字段 |
-| next hop | `NextHop` / `Original nexthop` / `Relay IP Nexthop` |
-| checksum / sequence / age | 可能显示为缩写：`CkSum` / `Seq#` / `Ls age` |
+| Router-LSA | `router` |
+| Network-LSA | `network` |
+| Summary-LSA | `summary` |
+| ASBR-summary-LSA | `asbr` |
+| AS-External-LSA | `ase` |
+| Opaque link-local | `opaque-link` |
+| Opaque area-local | `opaque-area` |
+| Opaque AS-wide | `opaque-as` |
+| BGP NEXT_HOP | `routing-table` / `original-attributes` |
+| IS-IS LSP | `lsdb` / `database` |
+| LDP FEC | `mpls ldp` |
 
-### 第四步：如果用户只给 RFC URL 或章节名
-
-按这个顺序处理：
-
-1. 抽取协议名
-2. 抽取对象名
-   - 例如：Router LSA、Summary ASBR LSA、NEXT_HOP、AS_PATH、LDP FEC、PIM Join/Prune
-3. 判定对象属于哪一层
-   - 报文层 / 数据库层 / 路由结果层 / 邻居层 / 统计层 / 配置层
-4. 再选 CLI 家族
-5. 最后给字段映射和注意事项
-
-**重点：先像“例子 2”那样抓协议对象，再找命令，不要直接从 RFC 标题跳到具体命令。**
-
-## 通用命令选择框架
-
-### A. 报文层
-
-如果对象是报文、PDU、packet body、message header：
+这一阶段的目标是构造：
 
 ```text
-debugging <proto> packet ...
+候选命令模式
++ 候选关键词
++ 候选输出特征
 ```
 
-典型场景：
-- OSPF Hello / DD / LSUpdate / LSAck
-- BGP OPEN / UPDATE / NOTIFICATION
-- IS-IS IIH / LSP / SNP
-- LDP message / label mapping
-- PIM Join/Prune / Hello
+---
 
-### B. 数据库/广告对象层
+### 第 4 步：优先查官方资料源，不直接信推断
 
-如果对象是协议数据库条目、LSA、LSP、FEC、标签映射、组播树条目：
+这一步是必须的。
+
+**资料源优先级：**
+1. 本地华为 CHM 手册 / 解包后的 HTML 手册
+2. `support.huawei.com`
+3. `info.support.huawei.com`
+4. 同命令族模式类比推断
+
+**优先搜索位置：**
+- 本地华为 CHM 手册
+- 本地 CHM 解包后的 HTML 目录
+- `support.huawei.com`
+- `info.support.huawei.com`
+
+### 搜索策略
+
+不要直接搜整条内部字段路径。
+
+#### 如果有本地华为手册
+先搜索本地 CHM 或解包 HTML：
 
 ```text
-display <proto> lsdb/database/...
+<协议名> + <标准对象名>
+<协议名> + <候选关键词>
+display/debugging + <候选关键词>
 ```
 
-典型场景：
-- OSPF LSA → `display ospf ... lsdb ...`
-- IS-IS LSP → `display isis lsdb ...`
-- MPLS LDP FEC / LSP → `display mpls ldp ...`
-- PIM 路由/组播树 → `display pim routing-table`
+优先在本地手册里找：
+- 命令格式页
+- 命令参数页
+- 输出示例页
+- 诊断命令总表
 
-### C. 路由/属性结果层
-
-如果对象是 NEXT_HOP、MED、LOCAL_PREF、metric、best path、preference：
+#### 如果本地手册没有
+再搜索线上官方站：
 
 ```text
-display <proto> routing-table ...
+<协议名> + <标准对象名> + Huawei
+<协议名> + display/debugging + <标准对象名>
+<协议名> + <候选关键词> + Huawei
 ```
 
-必要时补：
-- 当前生效值
-- 邻居收到的原始属性
-- 递归后的下一跳
+例如：
+- `display ospf lsdb router Huawei`
+- `display ospf lsdb asbr Huawei`
+- `display ospf lsdb opaque-area Huawei`
+- `display bgp routing-table next hop Huawei`
+- `Huawei display bgp original-attributes NEXT_HOP`
 
-### D. 邻居/会话层
+### 证据优先级
 
-如果对象是 capability、state、holdtime、keepalive、adjacency 状态：
+优先级从高到低：
+1. **命令格式页**：参数列表里明确出现候选关键词
+2. **命令输出示例**：输出里的 `Type` / `字段名` 能对上目标对象
+3. **诊断命令总表**：能确认该命令族存在
+4. **本地/线上相邻命令模式类比**：只能作为推断，不算最终确认
+
+### 回答时必须标注证据状态
+
+| 状态 | 说明 |
+| --- | --- |
+| 官方确认 | 已在本地华为手册或华为官方文档中看到命令格式或输出示例 |
+| 高置信推断 | 未直接找到目标页，但同命令族、同对象模式充分一致 |
+| 低置信推断 | 只能给候选命令族，不能给唯一命令 |
+
+**搜不到官方页时，不要硬编唯一答案。**
+
+---
+
+### 第 5 步：用输出字段做回验
+
+这一步非常关键。
+命令名字像，不代表它就是目标命令。
+
+必须检查输出里是否真的能看到：
+- 目标对象类型
+- 目标字段名或等价字段
+- 目标 scope / subtype / TLV 特征
+
+### 回验规则
+
+| 候选命令 | 期望输出特征 |
+| --- | --- |
+| `display ospf lsdb router` | `Type : Router` |
+| `display ospf lsdb asbr` | `Type : Sum-Asbr` |
+| `display ospf lsdb opaque-area` | `Type : Opq-Area` / `Opaque Type` / `Opaque Id` |
+| `display bgp routing-table` | `NextHop` / 路由表属性字段 |
+| `... original-attributes` | 原始属性名，如 `Original nexthop` |
+
+### 否定性回验
+
+如果候选命令输出对不上目标对象，要明确排除。
+
+例如：
+- `display ospf lsdb asbr` 才是 Type 4 / `Sum-Asbr`
+- `display ospf asbr-summary` 可能是汇总/统计视图，不一定是 LSDB 里的 Type 4 LSA
+
+**名字像，不算命中；输出对上，才算命中。**
+
+---
+
+### 第 6 步：如果是报文头对象，不要直接等同于对象 body
+
+这是专门的防误判规则。
+
+例如：
+- `LSAcknowledge.lsa_headers`
+
+它表示的是：
+- 确认报文里带着哪些对象头
+
+它**不等于**：
+- 该对象 body 本体的完整内容
+
+所以这类问题要拆两条线回答：
+
+#### 线 A：想看被确认的对象本体
+- 去查数据库/对象命令
+- 例如：`display ospf lsdb <type>`
+
+#### 线 B：想看设备有没有发/收这种报文
+- 去查统计/调试命令
+- 例如：`display ospf statistics packet` / `display ospf cumulative` / `debugging ospf`
+
+**报文头对象 ≠ 数据库对象本体。**
+
+## 搜索与推导的固定决策树
 
 ```text
-display <proto> peer/neighbor/adjacency/session ...
+输入字段 / RFC章节
+-> 识别协议
+-> 识别对象层级
+-> 标准化为协议对象名
+-> 推导华为命名关键词
+-> 先搜本地华为 CHM/HTML 手册
+-> 再搜华为官方 support/hedex
+-> 用命令格式页确认候选命令
+-> 用输出字段回验对象是否匹配
+-> 给出主命令 / 补充命令 / 证据状态 / 注意事项
 ```
 
-### E. 统计层
+## 通用输出格式
 
-如果对象是收发计数、消息类型计数、累计统计：
+优先输出结构化结果，便于后续做程序化规则引擎。
 
-```text
-display <proto> cumulative
-display <proto> statistics
+```json
+{
+  "input_field": "<原始字段路径或RFC对象>",
+  "protocol": "<协议名>",
+  "packet_type": "<报文类型，可选>",
+  "object_layer": "<packet_header|object_body|tlv|attribute|state|statistics|config>",
+  "canonical_name": "<标准协议对象名>",
+  "standard_type": "<Type/TLV编号/Scope，可选>",
+  "huawei_cli": "<主命令>",
+  "secondary_cli": ["<补充命令1>", "<补充命令2>"],
+  "verify_output_contains": ["<期望输出特征1>", "<期望输出特征2>"],
+  "evidence_status": "<官方确认|高置信推断|低置信推断>",
+  "confidence": 0.0,
+  "notes": ["<注意事项1>", "<注意事项2>"]
+}
 ```
 
-### F. 配置层
-
-如果对象问的是“设备是否启用了这个能力 / 这个 timer 配了多少”：
+## 面向自然语言回答的输出模板
 
 ```text
-display current-configuration | include <keyword>
-```
-
-## 常见协议的起始命令家族
-
-> 这是“起始命令族”，不是完整命令大全。回答时要先判对象层次，再落到某个家族。
-
-| 协议 | 常见观察对象 | 华为起始命令族 |
-| --- | --- | --- |
-| OSPF | LSA / 邻居 / 包 / 统计 | `display ospf ...` / `debugging ospf ...` |
-| BGP | 路由属性 / peer / 收到路由 / 宣告路由 | `display bgp ...` |
-| IS-IS | LSP / 邻接 / SPF / 包 | `display isis ...` / `debugging isis ...` |
-| RIP | 路由 / 邻居 / 报文 | `display rip ...` / `debugging rip ...` |
-| BFD | 会话状态 / 计数器 | `display bfd session ...` |
-| LDP | peer / session / FEC / label | `display mpls ldp ...` |
-| RSVP-TE / TE | tunnel / path / RSVP 状态 | `display mpls te ...` / `display rsvp-te ...` |
-| PIM | neighbor / join-prune / routing-table | `display pim ...` |
-| IGMP / MLD | group / interface / statistics | `display igmp ...` / `display mld ...` |
-| ARP / ND | 邻居缓存 / 接口邻居 | `display arp` / `display nd` |
-
-## 输出规则
-
-当你无法 100% 确认某条唯一命令时，**不要硬编成唯一答案**。按下面格式回答：
-
-```text
-问题对象: <RFC 路径 / RFC 章节 / 协议对象>
-协议: <OSPF/BGP/IS-IS/...>
-分类: <报文层 | 数据库层 | 属性/结果层 | 邻居层 | 统计层 | 配置层>
-推荐命令: <最可能的主命令>
+问题对象: <RFC路径 / RFC章节 / 标准协议对象>
+协议: <协议名>
+报文类型: <可选>
+分类: <报文头对象 | 协议实体对象 | TLV/属性层对象 | 邻居/状态层对象 | 统计层对象 | 配置层对象>
+标准对象名: <标准协议术语>
+标准编号/范围: <Type / Scope / TLV / Attribute，可选>
+推荐命令: <主命令>
 补充命令:
-- <用来看原始值的命令>
-- <用来看结果值的命令>
-- <用来看统计的命令>
-为什么是它: <1~3 句>
+- <补充命令1>
+- <补充命令2>
+为什么是它: <1~3句>
 字段对应:
-- <RFC 字段> -> <Huawei 字段>
-- <RFC 字段> -> <Huawei 字段>
-置信度: <高 / 中 / 低>
+- <RFC字段> -> <Huawei字段>
+- <RFC字段> -> <Huawei字段>
+输出回验:
+- 期望看到 <字段/Type/Scope>
+证据状态: <官方确认|高置信推断|低置信推断>
+置信度: <高/中/低>
 注意事项:
+- <报文头 vs 对象本体>
 - <平台差异>
-- <原始值 vs 当前结果>
-- <如果需要前置配置，如 keep-all-routes>
+- <前置条件>
 ```
 
-## Worked Example 1：OSPF Ack 报文
+## 协议无关的主规则
 
-**问题对象**
+### 规则 1：先分类对象层级
+
+- 报文头对象
+- 协议实体对象
+- TLV / 属性层对象
+- 邻居 / 状态层对象
+- 统计层对象
+- 配置层对象
+
+### 规则 2：先转标准术语，再找 CLI
+
+不要直接从内部字段名搜厂商命令。
+先转成标准协议对象名。
+
+### 规则 3：CLI 优先走统一命令族
+
+- 报文 -> `debugging <proto> packet`
+- 数据库对象 -> `display <proto> lsdb/database/...`
+- 属性/结果 -> `display <proto> routing-table/...`
+- 邻居/状态 -> `display <proto> peer/neighbor/...`
+- 统计 -> `display <proto> statistics/cumulative`
+
+### 规则 4：必须做输出回验
+
+命令只有在输出特征对上目标对象时，才算命中。
+
+### 规则 5：遇到 scope / TLV / subtype 必须补范围判断
+
+例如：
+- Opaque link-local -> `opaque-link`
+- Opaque area-local -> `opaque-area`
+- Opaque AS-wide -> `opaque-as`
+- BGP 属性 -> 先判断是原始属性、当前值还是递归结果
+
+### 规则 6：优先官方确认，推断必须显式降级
+
+- 能搜到华为官方页，就标 `官方确认`
+- 搜不到，只能标 `高置信推断` 或 `低置信推断`
+- 不能把推断写成已确认事实
+
+## Worked Example 1：OSPF Ack 报文头
+
+**输入**
 `OSPFv2.body@LSAcknowledge.lsa_headers`
 
-**分类**
-- 报文层
+**推导**
+- 协议：OSPFv2
+- 报文类型：LSAcknowledge
+- 对象层级：报文头对象
+- 标准对象：被确认的 LSA 头
 
 **推荐命令**
 ```text
@@ -216,110 +409,110 @@ debugging ospf [process-id] packet ack [interface ...] [brief] [filter ...]
 
 **补充命令**
 ```text
+display ospf statistics packet
 display ospf cumulative
 ```
 
-**为什么是它**
-- `LSAcknowledge` 是 OSPF 报文类型
-- `lsa_headers` 是 Ack 报文里携带的 LSA Header 列表
-- 所以优先走 **debug 报文**，不是 LSDB
-
-**字段对应**
-- `LS Type` -> `Type`
-- `Link State ID` -> `Ls id` / `LinkState ID`
-- `Advertising Router` -> `Adv rtr` / `AdvRouter`
-- `LS Age` -> `Ls age` / `Age`
-- `LS Sequence Number` -> `Seq#` / `Sequence`
-- `LS Checksum` -> `CkSum` / `chksum`
+**输出回验**
+- Ack / LSAck 相关报文统计
+- LSA Header 相关输出字段
 
 **注意事项**
-- 这是报文字段，不是数据库条目
-- 如果用户只关心是否存在 Ack 收发，可退化成 `display ospf cumulative`
+- 这是报文头对象，不是 LSA body 本体
+- 如果用户想看被确认的那条 LSA 本体，要继续映射到 `display ospf lsdb <type>`
 
-## Worked Example 2：RFC 2328 的 Router LSA
+## Worked Example 2：OSPF Router-LSA
 
-**问题对象**
-RFC 2328 → Router LSA
+**输入**
+RFC 2328 -> Router LSA
 
-**分类**
-- 数据库层 / LSA 对象层
+**推导**
+- 标准对象名：Router-LSA
+- 标准编号：Type 1
+- 厂商关键词：`router`
 
 **推荐命令**
 ```text
 display ospf [process-id] lsdb router [link-state-id] [originate-router [advertising-router-id] | self-originate]
 ```
 
-**为什么是它**
-- `Router LSA` 是明确的协议对象
-- 所以像“例子 2”这种问法，应该先抽取对象名 **Router LSA**，再映射到 `lsdb router`
+**输出回验**
+- `Type : Router`
+- `Ls id`
+- `Adv rtr`
 
 **字段对应**
 - `Link State ID` -> `Ls id`
 - `Advertising Router` -> `Adv rtr`
 - `LS Age` -> `Ls age`
 - `Length` -> `Len`
-- `Options` -> `Options`
 - `LS Sequence Number` -> `Seq#`
 - `LS Checksum` -> `CkSum` / `chksum`
 - `Number of links` -> `Link Count`
-- `Link ID` -> `Link ID`
-- `Link Data` -> `Data`
-- `Link Type` -> `Link Type`
-- `Metric` -> `Metric`
 
-**你可以按这种风格生成解释**
+## Worked Example 3：OSPF ASBR-summary-LSA
 
-```text
-OSPF Process 1 with Router ID 1.1.1.1
-                 Link State Database
-
-  Type      : Router                 <-- [RFC 2328] LSA Type = Router-LSA
-  Ls ID     : 1.1.1.1                <-- [RFC 2328] Link State ID
-  Adv Rtr   : 1.1.1.1                <-- [RFC 2328] Advertising Router
-  Ls Age    : 117                    <-- [RFC 2328] LS Age
-  Len       : 48                     <-- [RFC 2328] Length
-  Options   : E                      <-- [RFC 2328] Options
-  Seq#      : 80000004               <-- [RFC 2328] LS Sequence Number
-  CkSum     : 0xd32b                 <-- [RFC 2328] LS Checksum
-  Flags     : 0x0 / B / V / E        <-- [RFC 2328] Router-LSA Flags（平台相关）
-
-  Link Count: 2                      <-- [RFC 2328] Number of links
-```
-
-## Worked Example 3：OSPF Summary ASBR LSA
-
-**问题对象**
+**输入**
 `OSPFv2.body@LSUpdate.lsas[*]@SummaryASBRLSA`
 
-**分类**
-- 数据库层 / LSA 对象层
+**推导**
+- 协议：OSPFv2
+- 报文类型：LSUpdate
+- 对象层级：协议实体对象
+- 标准对象名：ASBR-summary-LSA
+- 标准编号：Type 4
+- 厂商关键词：`asbr`
 
 **推荐命令**
 ```text
 display ospf [process-id] lsdb asbr [link-state-id] [originate-router [advertising-router-id] | self-originate]
 ```
 
-**关键点**
+**输出回验**
+- `Type : Sum-Asbr`
+
+**关键注意事项**
 - Type 3 = `summary`
 - Type 4 = `asbr`
+- 不要把 `display ospf lsdb asbr` 和其他名字相似的汇总视图混掉
 
-**字段对应**
-- `SummaryASBRLSA` -> `Type: Sum-Asbr`
-- `Link State ID` -> `Ls id`
-- `Advertising Router` -> `Adv rtr`
-- `LS Age` -> `Ls age`
-- `Length` -> `Len`
-- `LS Sequence Number` -> `Seq#`
-- `LS Checksum` -> `CkSum` / `chksum`
-- `Metric` -> `Tos 0 metric`
+## Worked Example 4：OSPF Opaque Area LSA TLV
 
-## Worked Example 4：BGP RFC 4271 的 NEXT_HOP
+**输入**
+`OSPFv2.body@LSUpdate.lsas[*]@OpaqueAreaLocalLSA.tlvs`
 
-**问题对象**
+**推导**
+- 协议：OSPFv2
+- 报文类型：LSUpdate
+- 对象层级：TLV 层对象
+- 标准对象名：Area-local Opaque LSA
+- 标准范围：Opaque Area / Type 10 scope
+- 厂商关键词：`opaque-area`
+
+**推荐命令**
+```text
+display ospf [process-id] lsdb opaque-area [link-state-id]
+```
+
+**输出回验**
+- `Type : Opq-Area`
+- `Opaque Type`
+- `Opaque Id`
+- TLV 相关信息
+
+**注意事项**
+- 这里关心的是 TLV 级信息，不只是 LSA 类型名
+- 如果设备输出只给基本头部，不给 TLV 明细，要显式说明显示粒度受平台限制
+
+## Worked Example 5：BGP NEXT_HOP
+
+**输入**
 `BGP-4.path_attributes.NEXT_HOP`
 
-**分类**
-- 属性/结果层
+**推导**
+- 协议：BGP-4
+- 对象层级：属性层对象
+- 标准对象名：BGP path attribute `NEXT_HOP`
 
 **推荐命令**
 ```text
@@ -327,51 +520,46 @@ display bgp routing-table <prefix>
 ```
 
 **补充命令**
-如果用户问的是“邻居发给我的原始 RFC 属性值”：
-
 ```text
 display bgp routing-table peer <peer-ip> received-routes <prefix> original-attributes
 ```
 
-**为什么是它**
-- RFC 4271 的 `NEXT_HOP` 是 BGP UPDATE 路径属性
-- 在设备上通常要分清：
-  - `NextHop`：当前路由表展示列
-  - `Original nexthop`：更接近收到的原始 RFC 属性
-  - `Relay IP Nexthop`：递归解析后的结果
-
-**字段对应**
-- `NEXT_HOP` -> `Original nexthop`
-- `NEXT_HOP` -> `NextHop`
-- `NEXT_HOP` 的递归结果 -> `Relay IP Nexthop`
+**输出回验**
+- `NextHop`
+- `Original nexthop`
+- `Relay IP Nexthop`
 
 **注意事项**
-- 不要把“收到的原始属性”和“递归后的最终转发结果”混成一个字段
-- 某些视图需要前置条件，例如保留收到路由
+- `Original nexthop` 是最接近 RFC 原始属性的值
+- `NextHop` 是当前表项里的展示字段
+- `Relay IP Nexthop` 是递归后的结果
+- 不能把三者混为一谈
 
 ## 常见错误
 
-1. **直接从 RFC 名称跳到具体命令**
-   - 应先判断对象层次：报文 / 数据库 / 属性 / 邻居 / 统计 / 配置
+1. **字段路径直接找命令**
+   - 正确做法是：先转标准对象，再找 CLI
 
-2. **把原始协议值和最终生效结果混为一谈**
-   - 例如 BGP `NEXT_HOP` ≠ 递归后的下一跳结果
+2. **只看命令名字，不看输出回验**
+   - 名字像不算命中，输出对上才算命中
 
-3. **把“收到值 / 宣告值 / 当前值 / 配置值”混为一谈**
-   - 这四种观察面经常需要不同命令
+3. **把报文头对象当成数据库对象本体**
+   - `Acknowledge.headers` 不等于被确认对象的完整 body
 
-4. **只会套 OSPF 的 `lsdb` 思路**
-   - OSPF 是 worked example，不是唯一协议
-   - BGP、IS-IS、LDP、PIM 都要先回到“对象层次”再选命令族
+4. **把原始协议值和设备最终结果混为一谈**
+   - 尤其是 BGP 属性、递归下一跳、策略后结果
 
-5. **把平台差异写成绝对化结论**
-   - 回答时要标出：不同 VRP 平台、版本、产品线，字段名和可见深度可能不同
+5. **遇到 TLV / scope / subtype 不补范围判断**
+   - 这会导致选错命令族或选错子类型
+
+6. **搜不到官方页还给唯一答案**
+   - 必须显式降级为推断，不能伪装成官方确认
 
 ## References
 
 - RFC 2328: https://www.rfc-editor.org/rfc/rfc2328.txt
 - RFC 4271: https://www.rfc-editor.org/rfc/rfc4271
-- Huawei `display ospf lsdb`: https://support.huawei.com/enterprise/en/doc/EDOC1100459463/9b099a20
-- Huawei OSPF debugging commands: https://support.huawei.com/enterprise/en/doc/EDOC1100332318/915d8ce7/ospf-debugging-commands
-- Huawei `display ospf cumulative`: https://support.huawei.com/enterprise/en/doc/EDOC1100064351/a23305cc/display-ospf-cumulative
-- Huawei `display bgp routing-table`: https://support.huawei.com/enterprise/en/doc/EDOC1100325910/bdd63b27/display-bgp-routing-table
+- RFC 5250: https://www.rfc-editor.org/rfc/rfc5250
+- Local Huawei CHM manuals / extracted HTML manuals
+- Huawei Support: https://support.huawei.com/
+- Huawei HedEx: https://info.support.huawei.com/
